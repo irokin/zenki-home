@@ -1,4 +1,23 @@
 {
   "proxyUrl": "",
-  "proxyNeedsCode": false
+  "proxyNeedsCode": false,
+  "llm": {
+    "label": "DeepSeek V4.1 Flash",
+    "providerName": "OpenRouter",
+    "base": "https://openrouter.ai/api/v1",
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "extra": {
+      "reasoning": {
+        "effort": "low",
+        "exclude": true
+      }
+    },
+    "enc": {
+      "alg": "PBKDF2-SHA256/AES-256-GCM",
+      "iter": 600000,
+      "salt": "4TN5Oi38QmRQ4FiSaftjVg==",
+      "iv": "g34LR8xOlFAp4DE0",
+      "ct": "J9HtEpEmWVG2ux5V2EngiKB8vbaw22mw8xOsS5T9UkESmfeCyMIu5//gPDIrygLNvagsvvv/nmmlnO/58GuJkBA8m8PaGTh02NbitUNMZxZWN6Z+oj1pvDQ="
+    }
+  }
 }

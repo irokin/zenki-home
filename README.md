@@ -11,9 +11,12 @@ ZENKI Edge 家庭服务界面原型：AI 管家、家庭日历、家庭任务、
 高频问题由页面本地回答（标注「端侧」）。开放式问题交给云端模型（标注「云边协同」），页面按以下顺序选择：
 
 1. **在 claude.ai 里打开**：使用访客自己的 Claude。
-2. **ZENKI 代理**（推荐给公开演示）：Cloudflare Worker 持有 Anthropic 密钥，访客无需配置。地址写在 `config.json`。
-3. **Anthropic API 密钥**：在页面「AI 引擎设置」里填写，只保存在当前浏览器。
-4. **OpenAI 兼容接口**：DeepSeek、通义千问、OpenRouter 等。部分服务商不允许网页直接调用，遇到跨域错误请改用代理。
+2. **站点默认引擎**：OpenRouter 上的 `deepseek/deepseek-v4.1-flash-1017`。密钥用 PBKDF2（60 万次）+ AES-256-GCM 加密后放在 `config.json`，登录时填写 AI 访问码才会在浏览器里解密。访问码不在仓库里，由管理员单独发给演示对象。
+3. **ZENKI 代理**（推荐给公开演示）：Cloudflare Worker 持有 Anthropic 密钥，访客无需配置。地址写在 `config.json`。
+4. **Anthropic API 密钥**：在页面「AI 引擎设置」里填写，只保存在当前浏览器。
+5. **OpenAI 兼容接口**：DeepSeek、通义千问、OpenRouter 等。部分服务商不允许网页直接调用，遇到跨域错误请改用代理。
+
+> 加密只防止密钥在公开仓库里被直接读取。拿到访问码的人可以在浏览器里看到解密后的密钥，所以请在 OpenRouter 上给这个密钥设置额度上限，演示结束后更换。需要更强的保护时，改用下面的服务器端代理。
 
 ## 部署 ZENKI 代理（一次性，约 5 分钟）
 

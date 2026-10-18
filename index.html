@@ -743,6 +743,7 @@ button.stat:hover { background: var(--surface-2); }
     <form id="login-form" autocomplete="on">
       <div class="field"><label for="l-user">用户名</label><input id="l-user" name="username" autocomplete="username" required></div>
       <div class="field"><label for="l-pass">密码</label><input id="l-pass" name="password" type="password" autocomplete="current-password" required></div>
+      <div class="field"><label for="l-code">AI 访问码（选填，用于启用云端 AI 管家）</label><input id="l-code" name="ai-code" autocomplete="off" placeholder="ZENKI-XXXX-XXXX-XXXX"></div>
       <div class="login-err" id="login-err" role="alert"></div>
       <button class="btn primary" type="submit">登录</button>
     </form>
@@ -1082,7 +1083,12 @@ document.getElementById("login-form").addEventListener("submit", async e => {
   const u = document.getElementById("l-user").value.trim(), p = document.getElementById("l-pass").value;
   const h = await sha256(u + ":" + p);
   if (!EXPECTED) EXPECTED = await sha256("zenki_admin:zenki_admin");
-  if (h === EXPECTED) { setAuthed(true); document.getElementById("login-err").textContent = ""; showApp(); }
+  if (h === EXPECTED) {
+    setAuthed(true); document.getElementById("login-err").textContent = "";
+    const code = document.getElementById("l-code").value.trim();
+    if (code) window.__pendingAICode = code;
+    showApp();
+  }
   else { document.getElementById("login-err").textContent = "用户名或密码不对，请再试一次。"; document.getElementById("l-pass").value = ""; document.getElementById("l-pass").focus(); }
 });
 document.getElementById("logout").addEventListener("click", () => { setAuthed(false); location.reload(); });
@@ -1599,7 +1605,22 @@ const OA_PRESETS = {
 };
 const CLAUDE_MODELS = [["claude-sonnet-5-5", "Claude Sonnet 5.5（推荐）"], ["claude-haiku-5-5", "Claude Haiku 5.5（更快）"], ["claude-opus-5-5", "Claude Opus 5.5（最强）"]];
 let ENGINE_CFG = Object.assign({ mode: "auto", proxyUrl: "", proxyCode: "", anthropicKey: "", anthropicModel: "claude-sonnet-5-5", oaPreset: "deepseek", oaBase: OA_PRESETS.deepseek.base, oaKey: "", oaModel: OA_PRESETS.deepseek.model }, loadJSON(ENGINE_KEY) || {});
-let SITE_CFG = { proxyUrl: "", proxyNeedsCode: false };
+let SITE_CFG = { proxyUrl: "", proxyNeedsCode: false, llm: null };
+let SITE_KEY = null;
+const AI_CODE_KEY = "zenki-ai-code";
+async function unlockSiteKey(code) {
+  await siteCfgReady;
+  const L = SITE_CFG.llm; if (!L || !L.enc || !code) return false;
+  try {
+    const b = s => Uint8Array.from(atob(s), ch => ch.charCodeAt(0));
+    const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(code.trim().toUpperCase()), "PBKDF2", false, ["deriveKey"]);
+    const k = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: b(L.enc.salt), iterations: L.enc.iter, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    SITE_KEY = new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: b(L.enc.iv) }, k, b(L.enc.ct)));
+    try { localStorage.setItem(AI_CODE_KEY, code.trim().toUpperCase()); } catch (e) {}
+    return true;
+  } catch (e) { SITE_KEY = null; return false; }
+}
+function forgetSiteKey() { SITE_KEY = null; try { localStorage.removeItem(AI_CODE_KEY); } catch (e) {} }
 let siteCfgReady = (typeof fetch === "function" && location.protocol.startsWith("http"))
   ? fetch("config.json", { cache: "no-store" }).then(r => r.ok ? r.json() : null).then(j => { if (j && typeof j === "object") SITE_CFG = Object.assign(SITE_CFG, j); }).catch(() => {})
   : Promise.resolve();
@@ -1608,7 +1629,9 @@ async function resolveEngine(opts = {}) {
   await siteCfgReady;
   const mode = opts.mode || ENGINE_CFG.mode;
   const proxy = (ENGINE_CFG.proxyUrl || SITE_CFG.proxyUrl || "").trim();
+  const L = SITE_CFG.llm;
   const mk = {
+    site: () => (SITE_KEY && L) ? { kind: "openai", site: true, label: L.label || L.model, base: L.base.replace(/\/+$/, ""), key: SITE_KEY, model: L.model, extra: L.extra || {}, headers: { "HTTP-Referer": location.origin + location.pathname, "X-Title": "ZENKI Home" } } : null,
     sample: async () => { const sm = await getSample(); return sm ? { kind: "sample", label: "Claude（claude.ai）", sample: sm } : null; },
     proxy: () => proxy ? { kind: "proxy", label: "Claude（ZENKI 代理）", url: proxy, code: ENGINE_CFG.proxyCode } : null,
     anthropic: () => ENGINE_CFG.anthropicKey ? { kind: "anthropic", label: "Claude（" + ((CLAUDE_MODELS.find(x => x[0] === ENGINE_CFG.anthropicModel) || [0, ENGINE_CFG.anthropicModel])[1].split("（")[0].replace("Claude ", "")) + "）", key: ENGINE_CFG.anthropicKey, model: ENGINE_CFG.anthropicModel } : null,
@@ -1617,10 +1640,11 @@ async function resolveEngine(opts = {}) {
   if (mode !== "auto") return mk[mode] ? await mk[mode]() : null;
   // in claude.ai the viewer's own Claude answers; elsewhere the proxy, then personal keys
   if (window.claude && window.claude.use) { const e = await mk.sample(); if (e) return e; }
-  return mk.proxy() || mk.anthropic() || mk.openai();
+  return mk.site() || mk.proxy() || mk.anthropic() || mk.openai();
 }
 function engineError(status, j) {
   const msg = j && j.error ? (j.error.message || (typeof j.error === "string" ? j.error : "")) : "";
+  if (status === 402) return { code: "credits", message: msg || "额度不足" };
   const code = status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limited" : status === 400 ? "bad_request" : "upstream_error";
   return { code, message: msg || ("HTTP " + status) };
 }
@@ -1637,7 +1661,7 @@ async function anthropicCall(eng, body, signal) {
 }
 async function openaiCall(eng, body, signal) {
   let r;
-  try { r = await fetch(eng.base + "/chat/completions", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + eng.key }, body: JSON.stringify(Object.assign({ model: eng.model }, body)), signal }); }
+  try { r = await fetch(eng.base + "/chat/completions", { method: "POST", headers: Object.assign({ "content-type": "application/json", authorization: "Bearer " + eng.key }, eng.headers || {}), body: JSON.stringify(Object.assign({ model: eng.model }, eng.extra || {}, body)), signal }); }
   catch (e) { if (e && e.name === "AbortError") throw { code: "cancelled" }; throw { code: "network", message: String(e && e.message || e) }; }
   const j = await r.json().catch(() => null);
   if (!r.ok) throw engineError(r.status, j);
@@ -1717,6 +1741,7 @@ function engineErrorText(e) {
   const c = e && e.code;
   if (c === "cancelled") return "已停止。";
   if (c === "auth") return "云端模型拒绝了请求：密钥或访问码不正确。请在「AI 引擎设置」里检查。";
+  if (c === "credits") return "云端模型账户额度不足，请联系管理员充值。";
   if (c === "rate_limited") return "云端模型请求太频繁或额度用完了，稍后再试。";
   if (c === "network") return "浏览器连不上这个模型服务。可能是网络问题，或该服务不允许网页直接调用（跨域限制），建议改用 ZENKI 代理。";
   if (c === "not_granted" || c === "sampling_disabled") return "没有获得使用 Claude 的授权。";
@@ -1728,7 +1753,8 @@ async function refreshEngineChip() {
   currentEngine = await resolveEngine();
   const lbl = $("#engine-label"), dot = $("#engine-btn .dot");
   if (!lbl) return;
-  lbl.textContent = currentEngine ? "云端：" + currentEngine.label : "云端 AI 未配置";
+  const locked = !currentEngine && SITE_CFG.llm && !SITE_KEY;
+  lbl.textContent = currentEngine ? "云端：" + currentEngine.label : locked ? "输入访问码启用云端 AI" : "云端 AI 未配置";
   dot.classList.toggle("off", !currentEngine);
 }
 
@@ -1737,9 +1763,16 @@ function renderAISettings(testMsg) {
   const c = ENGINE_CFG, siteProxy = SITE_CFG.proxyUrl;
   const inClaude = !!(window.claude && window.claude.use);
   const modeRow = (k, t, d) => `<label class="ai-mode"><input type="radio" name="ai-mode" value="${k}" ${c.mode === k ? "checked" : ""}><span><b>${t}</b><small>${d}</small></span></label>`;
+  const L = SITE_CFG.llm;
   $("#ai-body").innerHTML = `
+    ${L ? `<div class="panel" style="gap:8px">
+      <div class="panel-head"><h3>站点默认引擎：${esc(L.label || L.model)}</h3>${SITE_KEY ? stateChip("ok", "已启用") : stateChip("warn", "未解锁")}</div>
+      <p class="note" style="font-size:13px">通过 ${esc(L.providerName || "OpenRouter")} 调用，模型 <span class="mono">${esc(L.model)}</span>。密钥以 AES-256 加密保存在站点配置里，输入访问码后只在本浏览器解密。</p>
+      ${SITE_KEY ? `<div class="actions"><button class="btn sm ghost" type="button" id="ai-lock">在本设备上停用</button></div>` : `<div class="mem-add" style="grid-template-columns:minmax(0,1fr) auto"><div class="field"><label for="ai-site-code">访问码</label><input id="ai-site-code" autocomplete="off" placeholder="ZENKI-XXXX-XXXX-XXXX"></div><button class="btn primary" type="button" id="ai-unlock">启用</button></div>`}
+    </div>` : ""}
     <div class="ai-modes">
-      ${modeRow("auto", "自动选择（推荐）", inClaude ? "在 claude.ai 里使用你的 Claude；其他地方依次使用 ZENKI 代理、个人密钥" : "依次使用 ZENKI 代理、Anthropic 密钥、OpenAI 兼容接口")}
+      ${modeRow("auto", "自动选择（推荐）", inClaude ? "在 claude.ai 里使用你的 Claude；其他地方依次使用站点默认引擎、代理、个人密钥" : "依次使用站点默认引擎、ZENKI 代理、Anthropic 密钥、OpenAI 兼容接口")}
+      ${L ? modeRow("site", "站点默认引擎", (L.label || L.model) + "，需要访问码") : ""}
       ${modeRow("proxy", "ZENKI 代理", siteProxy ? "站点已配置代理，访客无需填写密钥" : "密钥保存在服务器端（Cloudflare Worker），访客无需填写")}
       ${modeRow("anthropic", "Anthropic API 密钥", "浏览器直接调用 Claude，密钥只保存在本浏览器")}
       ${modeRow("openai", "OpenAI 兼容接口", "DeepSeek、通义千问、OpenRouter 等；部分服务商不允许网页直接调用")}
@@ -1773,6 +1806,15 @@ $("#ai-close").addEventListener("click", () => { $("#ai-modal").hidden = true; }
 $("#ai-modal").addEventListener("click", async e => {
   if (e.target.id === "ai-modal") { $("#ai-modal").hidden = true; return; }
   if (e.target.id === "ai-save") { readAISettings(); saveEngine(); await refreshEngineChip(); $("#ai-modal").hidden = true; toast(currentEngine ? "已保存，云端使用 " + currentEngine.label : "已保存，但还没有可用的云端引擎"); return; }
+  if (e.target.id === "ai-unlock") {
+    const code = $("#ai-site-code").value.trim(); if (!code) return;
+    e.target.disabled = true; e.target.textContent = "解锁中…";
+    const ok = await unlockSiteKey(code);
+    await refreshEngineChip();
+    renderAISettings(ok ? { ok: true, text: "已启用站点默认引擎。可以点「测试连接」确认模型可用。" } : { ok: false, text: "访问码不正确。" });
+    return;
+  }
+  if (e.target.id === "ai-lock") { forgetSiteKey(); await refreshEngineChip(); renderAISettings({ text: "已在本设备上停用站点默认引擎。" }); return; }
   if (e.target.id === "ai-clear") { Object.assign(ENGINE_CFG, { anthropicKey: "", oaKey: "", proxyCode: "" }); saveEngine(); renderAISettings({ text: "已清除本浏览器里保存的密钥。" }); refreshEngineChip(); return; }
   if (e.target.id === "ai-test") {
     readAISettings(); saveEngine();
@@ -3185,7 +3227,14 @@ $("#cat-filters").addEventListener("click", e => { const b = e.target.closest("[
    ========================================================= */
 function boot() {
   if (booted) return; booted = true;
-  renderCounts(); renderStatus(); renderSide(); renderSuggest(); fillForm(); greet(); refreshEngineChip();
+  renderCounts(); renderStatus(); renderSide(); renderSuggest(); fillForm(); greet();
+  (async () => {
+    let code = window.__pendingAICode; delete window.__pendingAICode;
+    let stored = null; try { stored = localStorage.getItem(AI_CODE_KEY); } catch (e) {}
+    if (code) { const ok = await unlockSiteKey(code); if (!ok) toast("AI 访问码不正确，云端 AI 未启用"); else toast("已启用云端 AI 管家"); }
+    else if (stored) await unlockSiteKey(stored);
+    refreshEngineChip();
+  })();
   const h = (location.hash || "").slice(1);
   if (["cal", "tasks", "twin", "data", "memory", "catalog"].includes(h)) go(h);
 }
